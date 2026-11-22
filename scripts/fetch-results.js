@@ -184,6 +184,30 @@ function isComplete(entry, E, now) {
   return true;
 }
 
+// One small index of every stock whose figures were filed in the last 45 days: the Worker uses it to show the "Result out" pill
+// even when NSE's board-meeting list has no row for that stock. Written only when something changed.
+function writeIndex() {
+  const now = Date.now(), items = {};
+  for (const f of fs.readdirSync(DIR).sort()) {
+    if (!f.endsWith('.json') || f.startsWith('_')) continue;
+    let e; try { e = JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')); } catch (x) { continue; }
+    if (!e || !e.sym || !e.bases) continue;
+    const c = e.bases.cons, s = e.bases.stand;
+    const b = c && (!s || c.qe >= s.qe) ? c : (s || c);
+    if (!b || !b.atMs) continue;
+    const filedUtc = b.atMs - IST;                          // atMs holds the IST wall-clock time as if it were UTC
+    const day = new Date(b.atMs).toISOString().slice(0, 10);
+    if (now - filedUtc > 45 * 864e5) continue;              // only recent filings
+    if ((Date.parse(day) - b.qe) / 864e5 > 100) continue;   // a revised old quarter is not a new result
+    items[e.sym] = { qe: new Date(b.qe).toISOString().slice(0, 10), day, outAt: new Date(filedUtc).toISOString() };
+  }
+  const file = path.join(DIR, '_index.json');
+  let oldItems = null; try { oldItems = JSON.parse(fs.readFileSync(file, 'utf8')).items; } catch (x) { /* first time */ }
+  if (oldItems && JSON.stringify(oldItems) === JSON.stringify(items)) { console.log('index unchanged (' + Object.keys(items).length + ' stocks)'); return; }
+  fs.writeFileSync(file, JSON.stringify({ updatedAt: new Date().toISOString(), items }));
+  console.log('index written: ' + Object.keys(items).length + ' stocks');
+}
+
 async function main() {
   fs.mkdirSync(DIR, { recursive: true });
   let raw; try { raw = JSON.parse(fs.readFileSync(RAW, 'utf8')); } catch (e) { console.log('data/corp-raw.json not found - nothing to do'); return; }
@@ -234,9 +258,10 @@ async function main() {
     }
     await sleep(900);
   }
+  writeIndex();
   console.log('\nprocessed ' + done + ' (ok ' + ok + ', failed ' + failed + '), skipped ' + skipped + ', left for next runs ' + Math.max(0, todo.length - done - skipped));
   if (done > 0 && ok === 0) process.exitCode = 0;   // never fail the job: the lists step already did its work
 }
 
-module.exports = { parseXbrl, toCrores, expectedQe, istMs };
+module.exports = { parseXbrl, toCrores, expectedQe, istMs, writeIndex };
 if (require.main === module) main().catch((e) => { console.error(e); });
