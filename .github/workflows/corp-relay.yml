@@ -1,8 +1,8 @@
 name: Corp relay
 on:
   schedule:
-    - cron: '*/20 3-17 * * *'     # every 20 min, 08:30-23:30 IST
-  workflow_dispatch:
+    - cron: '*/20 3-17 * * *'     # every 20 min, 03:00-17:59 UTC = about 08:30-23:30 IST (GitHub may delay it a few minutes)
+  workflow_dispatch:               # the "Run workflow" button
 permissions:
   contents: write
 concurrency:
@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Fetch NSE and BSE lists & XBRL results
+      - name: Fetch NSE and BSE lists
         env:
           WORKER_URL: https://corporate-actions.arpit332.workers.dev
           WORKER_KEY: ${{ secrets.WORKER_KEY }}
