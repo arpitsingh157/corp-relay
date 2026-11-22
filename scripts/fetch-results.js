@@ -176,6 +176,18 @@ async function buildBlock(sym) {
   return { consExpected, block: { basis: useCons ? 'cons' : 'stand', qe: latest.q, atMs: latest.t, at: latest.at, url: latest.url, rawUnit: unitText, quarters } };
 }
 
+// A board meeting counts as a RESULT meeting only when its purpose / agenda text says so. The company name at the start of bm_desc
+// ("HDB FINANCIAL SERVICES LTD has informed the Exchange about ...") is cut off first, so a name containing "Financial" is not a match,
+// and "fund raising", "annual general meeting" and similar agendas are not results.
+function isResultMeeting(row) {
+  const purpose = String(row.bm_purpose || row.purpose || '');
+  let desc = String(row.bm_desc || row.subject || '');
+  const cut = desc.search(/\bto consider\b/i);
+  if (cut >= 0) desc = desc.slice(cut);
+  else desc = desc.replace(/^.*?\bhas informed the exchange\b/i, '');
+  return /\bresults?\b|\bquarterly\b|\bunaudited\b|\baudited\b|\bfinancial\s+statements?\b/i.test(purpose + ' ' + desc);
+}
+
 function isComplete(entry, E, now) {
   const c = entry && entry.bases && entry.bases.cons, s = entry && entry.bases && entry.bases.stand;
   const b = c && (!s || c.qe >= s.qe) ? c : (s || c);
@@ -222,16 +234,21 @@ async function main() {
 
   // candidates: fresh filings (newest first), then board meetings of the last BACK_DAYS days (newest first)
   const cand = new Map();   // sym -> { fresh: epoch ms of newest filing, meet: epoch ms of meeting }
-  const bump = (sym, key, v) => { if (!sym) return; const c = cand.get(sym) || { fresh: 0, meet: 0 }; if (v > c[key]) c[key] = v; cand.set(sym, c); };
+  const bump = (sym, key, v) => { if (!sym) return; const c = cand.get(sym) || { fresh: 0, meet: 0, prio: 0 }; if (v > c[key]) c[key] = v; cand.set(sym, c); };
   (raw.nseFil || []).forEach((r) => bump(String(r.symbol || '').toUpperCase().trim(), 'fresh', istMs(r.an_dt || r.sort_date) || now));
+  // your own stocks (priority.txt in the repo + the symbols box of "Run workflow"): always fetched first, whatever their result date
+  let prioFile = ''; try { prioFile = fs.readFileSync('priority.txt', 'utf8'); } catch (e) { /* no file */ }
+  const prio = [process.env.SYMBOLS || '', prioFile].join(',').split(/[\s,;]+/).map((x) => x.toUpperCase().trim()).filter((x) => /^[A-Z0-9&-]+$/.test(x));
+  prio.forEach((x) => bump(x, 'prio', 1));
+  console.log('priority stocks: ' + (prio.length ? prio.join(', ') : 'none'));
   const lo = now - BACK_DAYS * 864e5;
   (raw.nseBm || []).forEach((r) => {
     const d = dayMs(r.meetingDate || r.bm_date || r.date);
     if (d == null || d > now || d < lo) return;
-    if (!/result|financial|quarterly|annual|audited/i.test([r.bm_purpose || r.purpose || '', r.bm_desc || r.subject || ''].join(' '))) return;
+    if (!isResultMeeting(r)) return;
     bump(String(r.bm_symbol || r.symbol || '').toUpperCase().trim(), 'meet', d);
   });
-  const todo = [...cand.entries()].filter(([s]) => !uni || uni.has(s)).sort((a, b) => (b[1].fresh - a[1].fresh) || (b[1].meet - a[1].meet));
+  const todo = [...cand.entries()].filter(([s, c]) => c.prio || !uni || uni.has(s)).sort((a, b) => (b[1].prio - a[1].prio) || (b[1].fresh - a[1].fresh) || (b[1].meet - a[1].meet));
   console.log('candidates: ' + todo.length + ', will process up to ' + MAX);
 
   let done = 0, ok = 0, failed = 0, skipped = 0;
@@ -263,5 +280,5 @@ async function main() {
   if (done > 0 && ok === 0) process.exitCode = 0;   // never fail the job: the lists step already did its work
 }
 
-module.exports = { parseXbrl, toCrores, expectedQe, istMs, writeIndex };
+module.exports = { parseXbrl, toCrores, expectedQe, istMs, writeIndex, isResultMeeting };
 if (require.main === module) main().catch((e) => { console.error(e); });
