@@ -1,5 +1,5 @@
 // Fetches the NSE / BSE corporate lists and writes data/corp-raw.json (read by the corporate-actions Worker through RELAY_URL).
-// Also pushes missing quarterly XBRL results (res2:<SYMBOL>) to the Worker's /ingest endpoint so hover cards load from KV.
+// Runs on GitHub Actions (Node 20, global fetch). Prints one line per source so you can see at once whether NSE / BSE let GitHub in.
 const fs = require('fs');
 const OUT = 'data/corp-raw.json';
 const NSE = 'https://www.nseindia.com';
@@ -9,10 +9,6 @@ const dmy = (i) => i.split('-').reverse().join('-');
 const ymd = (i) => i.replace(/-/g, '');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const FROM = ist(-30), TO = ist(90), AF = ist(-2), AT = ist(0);
-
-const WORKER_URL = (process.env.WORKER_URL || '').replace(/\/+$/, '');
-const WORKER_KEY = process.env.WORKER_KEY || '';
-const MAX_XBRL_PER_RUN = 15; // keeps each 20-min run fast and well within NSE rate limits
 
 let cookie = '', cookieAt = 0;
 async function warm() {
@@ -31,103 +27,14 @@ async function nse(path, qs, tries = 2) {
     await sleep(1500);
   }
 }
-async function nseXml(url) {
-  await warm();
-  const r = await fetch(url, { headers: { 'User-Agent': UA, 'Accept': 'application/xml,text/xml,*/*', 'Accept-Language': 'en-IN,en;q=0.9', 'Referer': NSE + '/', 'Cookie': cookie }, signal: AbortSignal.timeout(20000) });
-  if (!r.ok) throw new Error('XBRL HTTP ' + r.status);
-  const t = await r.text();
-  if (!/contextRef=/i.test(t)) throw new Error('Not valid XBRL');
-  return t;
-}
 async function bse(url) {
   const r = await fetch(url, { headers: { 'User-Agent': UA, 'Accept': 'application/json, text/plain, */*', 'Accept-Language': 'en-IN,en;q=0.9', 'Referer': 'https://www.bseindia.com/', 'Origin': 'https://www.bseindia.com' }, signal: AbortSignal.timeout(25000) });
   if (!r.ok) throw new Error('HTTP ' + r.status);
   const t = (await r.text()).trim(); if (!t || t[0] === '<') throw new Error('HTML instead of JSON');
   const j = JSON.parse(t); return Array.isArray(j) ? j : (Object.values(j || {}).find(Array.isArray) || []);
 }
-async function postWorker(payload) {
-  const r = await fetch(WORKER_URL + '/ingest', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Key': WORKER_KEY },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(20000),
-  });
-  return await r.json();
-}
-
 const isFiling = (r) => /financial\s*results?|integrated\s*filing.*financial/i.test(String(r.desc || '')) || /outcome\s+of\s+board\s+meeting/i.test(String(r.desc || '') + ' ' + String(r.attchmntText || ''));
 const qsN = (a, b) => `index=equities&from_date=${dmy(a)}&to_date=${dmy(b)}`;
-
-async function syncQuarterlyXbrl(data) {
-  if (!WORKER_URL || !WORKER_KEY) {
-    console.log('\nSkipping XBRL sync (WORKER_URL / WORKER_KEY not set).');
-    return;
-  }
-  const today = ist(0);
-  const syms = new Set();
-
-  // 1) Stocks with result filings in nseFil
-  (data.nseFil || []).forEach((r) => {
-    const s = String(r.symbol || r.sm_symbol || '').toUpperCase().trim();
-    if (s) syms.add(s);
-  });
-
-  // 2) Stocks whose board meeting date is today or in the past 30 days
-  (data.nseBm || []).forEach((r) => {
-    const s = String(r.bm_symbol || r.symbol || '').toUpperCase().trim();
-    const purpose = [r.bm_purpose || r.purpose || '', r.bm_desc || r.subject || ''].join(' ');
-    const rawDt = String(r.bm_date || r.meetingDate || '').trim();
-    if (!s || !/result|financial|quarterly|annual|audited/i.test(purpose)) return;
-    const m = /^(\d{1,2})-([A-Za-z]{3})-(\d{4})/.exec(rawDt);
-    const mons = { jan:'01', feb:'02', mar:'03', apr:'04', may:'05', jun:'06', jul:'07', aug:'08', sep:'09', oct:'10', nov:'11', dec:'12' };
-    const iso = m && mons[m[2].toLowerCase()] ? `${m[3]}-${mons[m[2].toLowerCase()]}-${m[1].padStart(2, '0')}` : rawDt.slice(0, 10);
-    if (iso && iso <= today && iso >= FROM) syms.add(s);
-  });
-
-  const candidates = [...syms];
-  console.log(`\nChecking XBRL results for ${candidates.length} recent result stocks (max ${MAX_XBRL_PER_RUN} uploads this run)...`);
-  let uploaded = 0, skipped = 0;
-
-  for (const sym of candidates) {
-    if (uploaded >= MAX_XBRL_PER_RUN) break;
-    try {
-      const enc = encodeURIComponent(sym);
-      let intRows = await nse('/api/integrated-filing-results', `index=equities&symbol=${enc}&period_ended=all&type=Integrated%20Filing-%20Financials`);
-      if (!intRows.length) {
-        await sleep(400);
-        intRows = await nse('/api/integrated-filing-results', `index=equities&symbol=${enc}`);
-      }
-      if (!intRows.length) continue;
-
-      const plan = await postWorker({ type: 'result-plan', sym, intRows });
-      if (!plan.ok || plan.alreadyStored || !Array.isArray(plan.urls) || !plan.urls.length) {
-        skipped++;
-        await sleep(300);
-        continue;
-      }
-
-      const xmls = {};
-      for (const u of plan.urls) {
-        try { xmls[u] = await nseXml(u); } catch (e) { console.log(`  ${sym} xml err: ${e.message}`); }
-        await sleep(350);
-      }
-      if (!Object.keys(xmls).length) continue;
-
-      const saved = await postWorker({ type: 'result', sym, intRows, xmls });
-      if (saved.ok) {
-        uploaded++;
-        console.log(`  SAVED ${sym}: ${saved.quarters} quarters (${saved.basis})`);
-      } else {
-        console.log(`  FAIL ${sym}: ${saved.error}`);
-      }
-      await sleep(600);
-    } catch (e) {
-      console.log(`  ERR ${sym}: ${e.message}`);
-      await sleep(800);
-    }
-  }
-  console.log(`XBRL sync done: ${uploaded} newly saved to KV, ${skipped} already in KV.`);
-}
 
 (async () => {
   const jobs = [
@@ -149,14 +56,8 @@ async function syncQuarterlyXbrl(data) {
   let old = null; try { old = JSON.parse(fs.readFileSync(OUT, 'utf8')); } catch (e) { /* first run */ }
   const same = old && Object.keys(data).length === Object.keys(old).filter((k) => Array.isArray(old[k])).length && Object.keys(data).every((k) => JSON.stringify(old[k]) === JSON.stringify(data[k]));
   // the Worker ignores a file older than 48 h, so even unchanged data is re-stamped every 12 h
-  if (!same || !old.fetchedAt || Date.now() - Date.parse(old.fetchedAt) >= 12 * 3600e3) {
-    fs.mkdirSync('data', { recursive: true });
-    fs.writeFileSync(OUT, JSON.stringify({ fetchedAt: new Date().toISOString(), from: FROM, to: TO, status, ...data }));
-    console.log('\nWrote ' + OUT + ' (' + Object.keys(data).join(', ') + ')');
-  } else {
-    console.log('\nNo change - file left as it is.');
-  }
-
-  // Sync quarterly XBRL results into CORP_KV
-  await syncQuarterlyXbrl(data);
+  if (same && old.fetchedAt && Date.now() - Date.parse(old.fetchedAt) < 12 * 3600e3) { console.log('\nNo change - file left as it is.'); return; }
+  fs.mkdirSync('data', { recursive: true });
+  fs.writeFileSync(OUT, JSON.stringify({ fetchedAt: new Date().toISOString(), from: FROM, to: TO, status, ...data }));
+  console.log('\nWrote ' + OUT + ' (' + Object.keys(data).join(', ') + ')');
 })().catch((e) => { console.error(e); process.exit(1); });
