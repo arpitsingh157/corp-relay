@@ -3,6 +3,10 @@ on:
   schedule:
     - cron: '*/20 3-17 * * *'     # every 20 min, 03:00-17:59 UTC = about 08:30-23:30 IST (GitHub may delay it a few minutes)
   workflow_dispatch:               # the "Run workflow" button
+    inputs:
+      max_symbols:
+        description: 'How many stocks to fetch result figures for in this run (use 60 for a big catch-up)'
+        default: '25'
 permissions:
   contents: write
 concurrency:
@@ -11,20 +15,24 @@ concurrency:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
       - name: Fetch NSE and BSE lists
-        env:
-          WORKER_URL: https://corporate-actions.arpit332.workers.dev
-          WORKER_KEY: ${{ secrets.WORKER_KEY }}
         run: node scripts/fetch-corp.js
+      - name: Fetch quarterly result figures (XBRL)
+        if: always()
+        continue-on-error: true
+        env:
+          MAX_SYMBOLS: ${{ github.event.inputs.max_symbols || '25' }}
+        run: node scripts/fetch-results.js
       - name: Commit if changed
+        if: always()
         run: |
           git config user.name "corp-relay"
           git config user.email "corp-relay@users.noreply.github.com"
-          git add data/corp-raw.json
-          git diff --cached --quiet || (git commit -m "corp data" && git push)
+          git add data/corp-raw.json data/results
+          git diff --cached --quiet || (git commit -m "corp data" && git pull --rebase -q && git push)
