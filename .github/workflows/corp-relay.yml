@@ -5,8 +5,11 @@ on:
   workflow_dispatch:               # the "Run workflow" button
     inputs:
       max_symbols:
-        description: 'How many stocks to fetch result figures for in this run (use 60 for a big catch-up)'
-        default: '25'
+        description: 'How many stocks to fetch result figures for in this run (use 200 for a big catch-up)'
+        default: '120'
+      symbols:
+        description: 'Optional: extra stocks to fetch first, comma separated (for example INDBANK,GVPTECH)'
+        default: ''
 permissions:
   contents: write
 concurrency:
@@ -23,16 +26,21 @@ jobs:
           node-version: 20
       - name: Fetch NSE and BSE lists
         run: node scripts/fetch-corp.js
+      - name: Save stock universe (once a day)
+        if: always()
+        continue-on-error: true
+        run: node scripts/fetch-universe.js
       - name: Fetch quarterly result figures (XBRL)
         if: always()
         continue-on-error: true
         env:
-          MAX_SYMBOLS: ${{ github.event.inputs.max_symbols || '25' }}
+          MAX_SYMBOLS: ${{ github.event.inputs.max_symbols || '120' }}
+          SYMBOLS: ${{ github.event.inputs.symbols }}
         run: node scripts/fetch-results.js
       - name: Commit if changed
         if: always()
         run: |
           git config user.name "corp-relay"
           git config user.email "corp-relay@users.noreply.github.com"
-          git add data/corp-raw.json data/results
+          git add data/corp-raw.json data/universe.json data/results
           git diff --cached --quiet || (git commit -m "corp data" && git pull --rebase -q && git push)
