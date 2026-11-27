@@ -7,7 +7,6 @@ const path = require('path');
 
 const NSE = 'https://www.nseindia.com';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
-const UNIVERSE_URL = 'https://angelone.arpit332.workers.dev/fno-list';
 const DIR = 'data/results';
 const RAW = 'data/corp-raw.json';
 const MAX = Number(process.env.MAX_SYMBOLS) || 25;
@@ -167,12 +166,16 @@ async function buildBlock(sym) {
     try {
       const p = parseXbrl(await xbrlText(pk.url));
       unitText = unitText || p.unit;
+      console.log('    xbrl ' + pk.url.split('/').pop() + ': ctx ' + p.contextCount + ', quarters [' + p.quarters.map((q) => q.toDate).join(',') + '], facts ' + p.factNames.slice(0, 25).join(','));
       p.quarters.forEach((q) => { if (!merged.has(q.toDate) || Date.parse(q.toDate) === pk.q) merged.set(q.toDate, q); });
     } catch (e) { console.log('    xbrl failed: ' + e.message); }
     await sleep(400);
   }
   const quarters = [...merged.values()].sort((x, y) => y.toDate.localeCompare(x.toDate)).map((q) => toCrores(q, CR));
-  if (!quarters.length || quarters[0].toDate !== new Date(latest.q).toISOString().slice(0, 10)) return { error: 'the newest quarter could not be read' };
+  const want = new Date(latest.q).toISOString().slice(0, 10);
+  if (!quarters.length || quarters[0].toDate !== want) {
+    return { error: `newest quarter unreadable: want ${want}, got [${quarters.map((q) => q.toDate).join(',')}], url ${latest.url}` };
+  }
   return { consExpected, block: { basis: useCons ? 'cons' : 'stand', qe: latest.q, atMs: latest.t, at: latest.at, url: latest.url, rawUnit: unitText, quarters } };
 }
 
@@ -227,10 +230,10 @@ async function main() {
 
   let uni = null;
   try {
-    const r = await fetch(UNIVERSE_URL, { signal: AbortSignal.timeout(20000) });
-    if (r.ok) { const j = await r.json(); uni = new Set([...(j.nifty500 || []).map((x) => x && x.symbol), ...(j.fnoSymbols || [])].filter(Boolean).map((s) => String(s).toUpperCase())); if (!uni.size) uni = null; }
-  } catch (e) { /* no filter */ }
-  console.log('stock list: ' + (uni ? uni.size + ' symbols' : 'not available, no filter'));
+    const u = JSON.parse(fs.readFileSync('data/universe.json', 'utf8'));
+    if (Array.isArray(u.symbols) && u.symbols.length) uni = new Set(u.symbols);
+  } catch (e) { /* no file: no filter */ }
+  console.log('stock list: ' + (uni ? uni.size + ' symbols (universe.json)' : 'not available, no filter'));
 
   // candidates: fresh filings (newest first), then board meetings of the last BACK_DAYS days (newest first)
   const cand = new Map();   // sym -> { fresh: epoch ms of newest filing, meet: epoch ms of meeting }
@@ -265,7 +268,7 @@ async function main() {
     const base = ex || { sym, bases: {} };
     if (res.block) {
       const old = base.bases[res.block.basis];
-      const next = { sym, savedAt: new Date().toISOString(), consExpected: !!res.consExpected, pdf: base.pdf || null, bases: { ...base.bases } };
+      const next = { sym, savedAt: new Date().toISOString(), lastTry: new Date().toISOString(), consExpected: !!res.consExpected, pdf: base.pdf || null, bases: { ...base.bases } };
       if (!old || old.qe <= res.block.qe) next.bases[res.block.basis] = res.block;
       fs.writeFileSync(fileOf(sym), JSON.stringify(next));
       ok++; console.log(sym.padEnd(14) + 'ok  ' + res.block.basis + ' quarter ended ' + new Date(res.block.qe).toISOString().slice(0, 10));
