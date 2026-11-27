@@ -161,20 +161,21 @@ async function buildBlock(sym) {
   const latest = qes[0];
   const near = (days) => qes.find((x) => x !== latest && Math.abs((latest.q - x.q) / 86400000 - days) <= 20);
   const picks = [latest, near(91), near(365)].filter(Boolean);
-  const merged = new Map(); let unitText = null;
+  const merged = new Map(); let unitText = null; const trail = [];
   for (const pk of picks) {
     try {
       const p = parseXbrl(await xbrlText(pk.url));
       unitText = unitText || p.unit;
+      trail.push(pk.url.split('/').pop().replace('INTEGRATED_FILING_INDAS_', '').replace('_WEB.xml', '') + ' ctx' + p.contextCount + ' [' + p.quarters.map((q) => q.toDate).join(',') + ']');
       console.log('    xbrl ' + pk.url.split('/').pop() + ': ctx ' + p.contextCount + ', quarters [' + p.quarters.map((q) => q.toDate).join(',') + '], facts ' + p.factNames.slice(0, 25).join(','));
       p.quarters.forEach((q) => { if (!merged.has(q.toDate) || Date.parse(q.toDate) === pk.q) merged.set(q.toDate, q); });
-    } catch (e) { console.log('    xbrl failed: ' + e.message); }
+    } catch (e) { trail.push(pk.url.split('/').pop() + ' ERR ' + e.message); console.log('    xbrl failed: ' + e.message); }
     await sleep(400);
   }
   const quarters = [...merged.values()].sort((x, y) => y.toDate.localeCompare(x.toDate)).map((q) => toCrores(q, CR));
   const want = new Date(latest.q).toISOString().slice(0, 10);
   if (!quarters.length || quarters[0].toDate !== want) {
-    return { error: `newest quarter unreadable: want ${want}, got [${quarters.map((q) => q.toDate).join(',')}], url ${latest.url}` };
+    return { error: `newest quarter unreadable: want ${want}, got [${quarters.map((q) => q.toDate).join(',')}], latest file ${latest.url.split('/').pop()}, picks: ${trail.join(' | ')}` };
   }
   return { consExpected, block: { basis: useCons ? 'cons' : 'stand', qe: latest.q, atMs: latest.t, at: latest.at, url: latest.url, rawUnit: unitText, quarters } };
 }
@@ -260,8 +261,8 @@ async function main() {
     let ex = null; try { ex = JSON.parse(fs.readFileSync(fileOf(sym), 'utf8')); } catch (e) { /* new */ }
     const savedMs = ex && ex.savedAt ? Date.parse(ex.savedAt) : 0;
     const freshNow = c.fresh > savedMs;
-    if (ex && isComplete(ex, E, now) && !freshNow) { skipped++; continue; }
-    if (ex && ex.lastTry && now - Date.parse(ex.lastTry) < RETRY_MS && !freshNow) { skipped++; continue; }
+    if (ex && isComplete(ex, E, now) && !freshNow && !c.prio) { skipped++; continue; }
+    if (ex && ex.lastTry && now - Date.parse(ex.lastTry) < RETRY_MS && !freshNow && !c.prio) { skipped++; continue; }
     done++;
     let res;
     try { res = await buildBlock(sym); } catch (e) { res = { error: String(e.message || e) }; }
