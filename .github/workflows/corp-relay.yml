@@ -42,5 +42,5 @@ jobs:
         run: |
           git config user.name "corp-relay"
           git config user.email "corp-relay@users.noreply.github.com"
-          git add data/corp-raw.json data/universe.json data/results
+          git add -A data
           git diff --cached --quiet || (git commit -m "corp data" && git pull --rebase -q && git push)
